@@ -34,6 +34,7 @@ class DBTable(db_api.DBTable):
         self.fields = fields
         self.key_field_name = key_field_name
 
+
     def count(self) -> int:
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=False) as db:
             return len(db)
@@ -59,13 +60,23 @@ class DBTable(db_api.DBTable):
     def delete_records(self, criteria: List[SelectionCriteria]) -> None:
         flag = 0
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
-            for key, value in db.items():
+            for key in db.keys():
                 for item in criteria:
                     if item.operator == '=':
                         item.operator = '=='
-                    if not value.get(item.field_name):
+                    if item.field_name == self.key_field_name:
+                        field_value = key
+                        item_value = item.value
+                    elif not db[key].get(item.field_name):
                         raise NameError
-                    if not eval(str(value[item.field_name]) + item.operator + str(item.value)):
+                    elif isinstance(db[key][item.field_name], str):
+                        field_value = "'" + db[key][item.field_name] + "'"
+                        item_value = "'" + item.value + "'"
+                    else:
+                        field_value = db[key][item.field_name]
+                        item_value = item.value
+
+                    if not eval(str(field_value) + item.operator + str(item_value)):
                         flag = 1
                         break
                 if not flag:
@@ -91,9 +102,18 @@ class DBTable(db_api.DBTable):
                 for item in criteria:
                     if item.operator == '=':
                         item.operator = '=='
-                    if not value.get(item.field_name):
+                    if item.field_name == self.key_field_name:
+                        field_value = key
+                        item_value = item.value
+                    elif not value.get(item.field_name):
                         raise NameError
-                    if not eval(str(value[item.field_name]) + item.operator + str(item.value)):
+                    elif isinstance(value[item.field_name], str):
+                        field_value = "'" + value[item.field_name] + "'"
+                        item_value = "'" + item.value + "'"
+                    else:
+                        field_value = value[item.field_name]
+                        item_value = item.value
+                    if not eval(str(field_value) + item.operator + str(item_value)):
                         flag = 1
                         break
                 if not flag:
@@ -107,9 +127,13 @@ class DBTable(db_api.DBTable):
 class DataBase(db_api.DataBase):
 
     tables: Dict[str, DBTable]
+    __tables__ = defaultdict(DBTable)
+
 
     def __init__(self):
-        self.tables = defaultdict(DBTable)
+        with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
+            for key in db:
+                DataBase.__tables__[key] = DBTable(key, db[key][0], db[key][1])
 
     def create_table(self,
                      table_name: str,
@@ -117,32 +141,45 @@ class DataBase(db_api.DataBase):
                      key_field_name: str) -> DBTable:
         db = shelve.open(os.path.join(db_api.DB_ROOT, table_name))
         db.close()
-        table = DBTable(table_name, fields, key_field_name)
-        if not self.tables.get(table_name):
+        if DataBase.__tables__.get(table_name):
             raise ValueError
-        self.tables[table_name] = table
+        flag = 0
+        for field_name in fields:
+            if key_field_name == field_name.name:
+                flag = 1
+                break
+        if not flag:
+            raise ValueError
+        with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
+            db[table_name] = [fields, key_field_name]
+        table = DBTable(table_name, fields, key_field_name)
+        DataBase.__tables__[table_name] = table
         return table
+
     def num_tables(self) -> int:
-        return len(self.tables)
+        return len(DataBase.__tables__)
 
     def get_table(self, table_name: str) -> DBTable:
-        if not self.tables.get(table_name):
+        if not DataBase.__tables__.get(table_name):
             raise ValueError
-        return self.tables[table_name]
+        return DataBase.__tables__[table_name]
 
 
 
     def delete_table(self, table_name: str) -> None:
-        db = (os.path.join('db_files', table_name + ".db.bak"))
+        db = (os.path.join('db_files', table_name + ".bak"))
         os.remove(db)
-        db = (os.path.join('db_files', table_name + ".db.dat"))
+        db = (os.path.join('db_files', table_name + ".dat"))
         os.remove(db)
-        db = (os.path.join('db_files', table_name + ".db.dir"))
+        db = (os.path.join('db_files', table_name + ".dir"))
         os.remove(db)
-        del self.tables[table_name]
+        with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
+            del db[table_name]
+        del DataBase.__tables__[table_name]
+
 
     def get_tables_names(self) -> List[Any]:
-        return list(self.tables.keys())
+        return list(DataBase.__tables__.keys())
 
 
     def query_multiple_tables(
