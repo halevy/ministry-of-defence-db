@@ -24,16 +24,18 @@ class SelectionCriteria(db_api.SelectionCriteria):
         self.operator = operator
         self.value = value
 
+
 class DBTable(db_api.DBTable):
     name: str
     fields: List[DBField]
     key_field_name: str
+    indexes: Dict[str, str]
 
     def __init__(self, name, fields, key_field_name):
         self.name = name
         self.fields = fields
         self.key_field_name = key_field_name
-
+        self.indexes = defaultdict()
 
     def count(self) -> int:
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=False) as db:
@@ -50,6 +52,14 @@ class DBTable(db_api.DBTable):
             if db.get(str(values[self.key_field_name])):
                 raise ValueError
             db[str(values[self.key_field_name])] = values
+
+        for key in values.keys():
+            if self.indexes.get(key):
+                with shelve.open(os.path.join(db_api.DB_ROOT, key + ".db"), writeback=True) as db:
+                    if not db.get(str(values[key])):
+                        db[str(values[key])] = list(values[self.key_field_name])
+                    else:
+                        db[str(values[key])].append(values[self.key_field_name])
 
     def delete_record(self, key: Any) -> None:
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
@@ -122,7 +132,9 @@ class DBTable(db_api.DBTable):
         return query_list
 
     def create_index(self, field_to_index: str) -> None:
-        pass
+        db = shelve.open(os.path.join(db_api.DB_ROOT, field_to_index + '.db'))
+        db.close()
+        self.indexes[field_to_index] = field_to_index + '.db'
 
 class DataBase(db_api.DataBase):
 
