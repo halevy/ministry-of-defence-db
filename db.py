@@ -16,9 +16,9 @@ class DBField(db_api.DBField):
     name: str
     type: Type
 
-    def __init__(self, name, type):
+    def __init__(self, name, type_):
         self.name = name
-        self.type = type
+        self.type = type_
 
 
 class SelectionCriteria(db_api.SelectionCriteria):
@@ -35,16 +35,21 @@ class SelectionCriteria(db_api.SelectionCriteria):
 class DBTable(db_api.DBTable):
     name: str
     fields: List[DBField]
+    key_field_name: str
     indexes: Dict[str, str]
 
-    def __init__(self, name, fields, key_field_name):
+    def __init__(self, name, fields, key_field_name, indexes=None):
+        if indexes is None:
+            indexes = defaultdict()
+
         self.name = name
         self.fields = fields
         self.key_field_name = key_field_name
-        self.indexes = defaultdict()
+        self.indexes = indexes
 
     def delete_key_from_index(self, db, key, field) -> None:
-        with shelve.open(os.path.join(db_api.DB_ROOT, self.indexes[field]), writeback=True) as index:
+        path = os.path.join(db_api.DB_ROOT, self.indexes[field])
+        with shelve.open(path, writeback=True) as index:
             ids_of_value = index[str(db[str(key)][field])]
 
             if len(ids_of_value) > 1:
@@ -53,42 +58,36 @@ class DBTable(db_api.DBTable):
             else:
                 del index[str(db[str(key)][field])]
 
-    def delete_from_index(self, db, key) -> None:
-        key_str = str(key)
+    @staticmethod
+    def is_not_meets_criterion(criterion, field_value) -> bool:
+        criterion = set_compare_operator(criterion)
 
-        for field in db[key_str].keys():
-            if self.indexes.get(field):
-                self.delete_key_from_index(db, key, field)
+        if isinstance(field_value, str):
+            field_value = "'" + field_value + "'"
+            item_value = "'" + criterion.value + "'"
 
-        del db[key_str]
+        else:
+            item_value = criterion.value
 
-    def is_meets_criterion(self, criteria: List[SelectionCriteria], key: Any, value: Any) -> bool:
-        for item in criteria:
-            item = set_compare_operator(item)
+        if not eval(str(field_value) + criterion.operator + str(item_value)):
+            return True
 
-            if item.field_name == self.key_field_name:
-                field_value = key
-                item_value = item.value
+        return False
 
-            elif not value.get(item.field_name):
+    def is_not_meets_criteria(self, criteria: List[SelectionCriteria], value: Any) -> bool:
+        for criterion in criteria:
+            if not value.get(criterion.field_name):
                 raise NameError
 
-            elif isinstance(value[item.field_name], str):
-                field_value = "'" + value[item.field_name] + "'"
-                item_value = "'" + item.value + "'"
-
-            else:
-                field_value = value[item.field_name]
-                item_value = item.value
-
-            if not eval(str(field_value) + item.operator + str(item_value)):
+            if self.is_not_meets_criterion(criterion, value[criterion.field_name]):
                 return True
 
         return False
 
     def insert_to_index(self, field, values) -> None:
         if self.indexes.get(field):
-            with shelve.open(os.path.join(db_api.DB_ROOT, self.indexes[field]), writeback=True) as index:
+            path = os.path.join(db_api.DB_ROOT, self.indexes[field])
+            with shelve.open(path, writeback=True) as index:
                 if not index.get(str(values[field])):
                     index[str(values[field])] = list(values[self.key_field_name])
 
@@ -117,21 +116,37 @@ class DBTable(db_api.DBTable):
         for field in values.keys():
             self.insert_to_index(field, values)
 
+    def delete_also_from_index(self, db, key) -> None:
+        key_str = str(key)
+
+        for field in db[key_str].keys():
+            if self.indexes.get(field):
+                self.delete_key_from_index(db, key, field)
+
+        del db[key_str]
+
     def delete_record(self, key: Any) -> None:
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
-            key_str = str(key)
 
-            if not db.get(key_str):
+            if not db.get(str(key)):
                 raise ValueError
 
-            self.delete_from_index(db, key)
+            self.delete_also_from_index(db, key)
 
     def delete_records(self, criteria: List[SelectionCriteria]) -> None:
+        ids_not_meet_criteria = set()
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
-            for key, value in db.items():
+            for item in criteria:
 
-                if not self.is_meets_criterion(criteria, key, value):
-                    self.delete_from_index(db, key)
+                if self.indexes.get(item.field_name):
+                    self.query_with_index(item, ids_not_meet_criteria)
+
+                else:
+                    self.query_without_index(item, ids_not_meet_criteria, db)
+
+            for key in db.keys():
+                if key not in list(ids_not_meet_criteria):
+                    self.delete_also_from_index(db, key)
 
     def get_record(self, key: Any) -> Dict[str, Any]:
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=False) as db:
@@ -141,34 +156,78 @@ class DBTable(db_api.DBTable):
             return db[str(key)]
 
     def update_record(self, key: Any, values: Dict[str, Any]) -> None:
+
         with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
-            key = str(key)
+            key_str = str(key)
+            if db.get(key_str):
+                for field in db[key_str].keys():
+                    if not values.get(field):
+                        continue
 
-            if db.get(key):
-                for field in db[key].keys():
-                    if (field not in values.keys() or db[key][field] != values[field]) and self.indexes.get(field):
-                        self.delete_key_from_index(db, key, field)
+                    if db[key_str][field] != values[field]:
+                        if self.indexes.get(field):
+                            self.delete_key_from_index(db, key, field)
 
+                values[self.key_field_name] = key
                 for field in values.keys():
-                    if field not in db[key].keys():
-                        self.insert_to_index(field, values)
+                    self.insert_to_index(field, values)
 
-                db[key] = values
+                db[key_str].update(values)
+
+    def query_with_index(self, criterion, ids_not_meet_criteria):
+        path = os.path.join(db_api.DB_ROOT, self.indexes[criterion.field_name])
+        with shelve.open(path, writeback=True) as index:
+            for key in index.keys():
+                if self.is_not_meets_criterion(criterion, key):
+                    ids_list = index[key]
+                    for id_ in ids_list:
+                        ids_not_meet_criteria.add(id_)
+
+    def query_without_index(self, criterion, ids_not_meet_criteria, db):
+        for key, value in db.items():
+            if self.is_not_meets_criterion(criterion, value[criterion.field_name]):
+                ids_not_meet_criteria.add(key)
 
     def query_table(self, criteria: List[SelectionCriteria]) -> List[Dict[str, Any]]:
+        ids_not_meet_criteria = set()
         query_list = []
+        with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
+            for item in criteria:
+                if self.indexes.get(item.field_name):
+                    self.query_with_index(item, ids_not_meet_criteria)
 
-        with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=False) as db:
-            for key, value in db.items():
-                if not self.is_meets_criterion(criteria, key, value):
+                else:
+                    self.query_without_index(item, ids_not_meet_criteria, db)
+
+            list_ = list(ids_not_meet_criteria)
+
+            for value in db.values():
+                if value.get(self.key_field_name) and value[self.key_field_name] not in list_:
                     query_list.append(value)
 
         return query_list
 
     def create_index(self, field_to_index: str) -> None:
-        db = shelve.open(os.path.join(db_api.DB_ROOT, field_to_index + '.db'))
-        db.close()
         self.indexes[field_to_index] = field_to_index + "_" + self.name + '.db'
+
+        with shelve.open(os.path.join(db_api.DB_ROOT, self.name), writeback=True) as db:
+            with shelve.open(os.path.join(db_api.DB_ROOT, self.indexes[field_to_index])) as index:
+                for record in db.values():
+                    key_index = record.get(field_to_index, None)
+
+                    if key_index is None:
+                        continue
+
+                    key_index = str(key_index)
+
+                    if key_index in index.keys():
+                        index[key_index] += [record[self.key_field_name]]
+
+                    else:
+                        index[key_index] = [record[self.key_field_name]]
+
+        with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
+            db[self.name][2] = self.indexes
 
 
 class DataBase(db_api.DataBase):
@@ -178,7 +237,9 @@ class DataBase(db_api.DataBase):
     def __init__(self):
         with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
             for key in db:
-                DataBase.__tables__[key] = DBTable(key, db[key][0], db[key][1])
+                # DataBase.__tables__[key] = DBTable(key, db[key][0], db[key][1])
+
+                DataBase.__tables__[key] = DBTable(key, db[key][0], db[key][1], db[key][2])
 
     def create_table(self,
                      table_name: str,
@@ -199,9 +260,11 @@ class DataBase(db_api.DataBase):
             raise ValueError
 
         with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
-            db[table_name] = [fields, key_field_name]
+            db[table_name] = [fields, key_field_name, {}]
+
         table = DBTable(table_name, fields, key_field_name)
         DataBase.__tables__[table_name] = table
+
         return table
 
     def num_tables(self) -> int:
@@ -212,7 +275,8 @@ class DataBase(db_api.DataBase):
             raise ValueError
         return DataBase.__tables__[table_name]
 
-    def delete_table(self, table_name: str) -> None:
+    @staticmethod
+    def delete_shelve_file(table_name):
         db = (os.path.join('db_files', table_name + ".bak"))
         os.remove(db)
         db = (os.path.join('db_files', table_name + ".dat"))
@@ -220,24 +284,17 @@ class DataBase(db_api.DataBase):
         db = (os.path.join('db_files', table_name + ".dir"))
         os.remove(db)
 
+    def delete_table(self, table_name: str) -> None:
         with shelve.open(os.path.join(db_api.DB_ROOT, "DB.db"), writeback=True) as db:
-            del db[table_name]
+            indexes = db[table_name][2]
+            for value in indexes.values():
+                self.delete_shelve_file(value)
 
+            del db[table_name]
+        self.delete_shelve_file(table_name)
         del DataBase.__tables__[table_name]
 
     def get_tables_names(self) -> List[Any]:
         return list(DataBase.__tables__.keys())
 
-    def query_multiple_tables(
-            self,
-            tables: List[str],
-            fields_and_values_list: List[List[SelectionCriteria]],
-            fields_to_join_by: List[str]
-    ) -> List[Dict[str, Any]]:
-        pass
-
-
-
-
-
-
+  
