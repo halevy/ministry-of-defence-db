@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from db import DataBase
-from db_api import DB_ROOT
-from test_db import DB_BACKUP_ROOT, delete_files, create_students_table
+from src.db import DataBase
+from src.db_api import DB_ROOT
+from src.test_db import DB_BACKUP_ROOT, delete_files, create_students_table
 
 
 def create_db_backup() -> Path:

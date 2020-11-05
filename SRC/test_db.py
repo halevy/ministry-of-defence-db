@@ -1,4 +1,3 @@
-
 import datetime as dt
 import time
 from functools import partial
@@ -7,8 +6,8 @@ from typing import Generator
 
 import pytest
 
-from db import DataBase
-from db_api import DBField, SelectionCriteria, DB_ROOT, DBTable
+from src.db import DataBase
+from src.db_api import DBField, SelectionCriteria, DB_ROOT, DBTable
 
 DB_BACKUP_ROOT = DB_ROOT.parent / (DB_ROOT.name + '_backup')
 STUDENT_FIELDS = [DBField('ID', int), DBField('First', str),
@@ -47,7 +46,7 @@ def add_student(table: DBTable, index: int, **kwargs) -> None:
     )
     info.update(**kwargs)
     table.insert_record(info)
-
+    
 
 @pytest.fixture(scope='function')
 def new_db() -> Generator[DataBase, None, None]:

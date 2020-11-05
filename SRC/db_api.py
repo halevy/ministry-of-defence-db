@@ -77,4 +77,4 @@ class DataBase:
     def get_tables_names(self) -> List[Any]:
         raise NotImplementedError
 
-    
+
